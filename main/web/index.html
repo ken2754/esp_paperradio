@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PaperRadio Control & Setup</title>
+<style>
+:root {
+  --bg: #0f172a;
+  --card: #1e293b;
+  --border: #334155;
+  --text: #f8fafc;
+  --muted: #94a3b8;
+  --accent: #38bdf8;
+  --accent-hover: #0284c7;
+  --danger: #ef4444;
+  --success: #22c55e;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 20px 14px 60px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg); color: var(--text);
+}
+.container { max-width: 720px; margin: 0 auto; }
+header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 18px; padding-bottom: 12px; border-bottom: 1px solid var(--border);
+}
+h1 { margin: 0; font-size: 1.35rem; letter-spacing: 0.04em; color: var(--accent); }
+.sys-pill { font-size: 0.8rem; color: var(--muted); }
+.card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 12px; padding: 18px; margin-bottom: 18px;
+}
+.card h2 {
+  margin: 0 0 12px; font-size: 1rem; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--muted);
+}
+.now-playing-station { font-size: 1.3rem; font-weight: 700; margin-bottom: 4px; }
+.now-playing-track {
+  font-size: 1.05rem; color: var(--accent); min-height: 1.4em;
+  margin-bottom: 10px; word-break: break-word;
+}
+.badge {
+  display: inline-block; padding: 3px 10px; border-radius: 999px;
+  font-size: 0.75rem; font-weight: 700; background: var(--border);
+}
+.badge.PLAYING { background: var(--success); color: #052e16; }
+.badge.BUFFERING { background: #f59e0b; color: #451a03; }
+.controls-row {
+  display: flex; align-items: center; gap: 12px; margin-top: 14px; flex-wrap: wrap;
+}
+button {
+  background: var(--accent); color: #0f172a; border: none; border-radius: 8px;
+  padding: 9px 16px; font-weight: 700; cursor: pointer; font-size: 0.9rem;
+}
+button:hover { background: var(--accent-hover); color: #fff; }
+button.secondary { background: var(--border); color: var(--text); }
+button.danger { background: var(--danger); color: #fff; }
+input[type="text"], input[type="password"], input[type="url"] {
+  width: 100%; padding: 9px 11px; border-radius: 8px;
+  border: 1px solid var(--border); background: var(--bg); color: var(--text);
+  font-size: 0.9rem;
+}
+input[type="range"] { flex: 1; min-width: 140px; accent-color: var(--accent); }
+.station-list { display: flex; flex-direction: column; gap: 8px; }
+.station-item {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 8px; align-items: center;
+  padding: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+}
+.station-item.active { border-color: var(--accent); }
+.station-fields { display: grid; grid-template-columns: 1fr 1.6fr; gap: 8px; }
+@media (max-width: 560px) {
+  .station-fields { grid-template-columns: 1fr; }
+}
+.station-actions { display: flex; gap: 6px; }
+.station-actions button { padding: 7px 10px; font-size: 0.8rem; }
+.row-gap { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+.toast {
+  position: fixed; bottom: 18px; right: 18px; background: #0284c7; color: #fff;
+  padding: 10px 16px; border-radius: 8px; font-weight: 600; display: none;
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1>PAPERRADIO</h1>
+    <div class="sys-pill" id="sysInfo">Connecting...</div>
+  </header>
+
+  <div class="card">
+    <h2>Now Playing</h2>
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">
+      <span class="badge" id="stateBadge">STOPPED</span>
+      <span class="sys-pill" id="streamMeta"></span>
+    </div>
+    <div class="now-playing-station" id="curStation">-</div>
+    <div class="now-playing-track" id="curTrack">-</div>
+    <div class="controls-row">
+      <button id="playStopBtn" onclick="togglePlay()">Play</button>
+      <span style="font-size:0.85rem;color:var(--muted);">VOL</span>
+      <input type="range" id="volSlider" min="0" max="100" step="1" oninput="onVolInput(this.value)" onchange="setVolume(this.value)">
+      <span id="volLabel" style="min-width:38px;text-align:right;font-weight:700;">40%</span>
+      <button class="secondary" onclick="refreshEpd()">Refresh EPD</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Station Presets (SomaFM &amp; Custom Streams)</h2>
+    <div class="station-list" id="stationList"></div>
+    <div class="row-gap">
+      <button class="secondary" onclick="addStation()">+ Add Station</button>
+      <button onclick="saveStations()">Save Station List</button>
+      <button class="secondary" onclick="resetStations()">Restore SomaFM Defaults</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Wi-Fi Settings</h2>
+    <div style="display:grid;gap:10px;">
+      <div>
+        <label style="font-size:0.8rem;color:var(--muted);">SSID</label>
+        <input type="text" id="wifiSsid" placeholder="Wi-Fi network name">
+      </div>
+      <div>
+        <label style="font-size:0.8rem;color:var(--muted);">Password</label>
+        <input type="password" id="wifiPass" placeholder="Leave blank to keep existing / open network">
+      </div>
+    </div>
+    <div class="row-gap">
+      <button onclick="saveWifi()">Save &amp; Connect Wi-Fi</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let stations = [];
+let currentIdx = 0;
+let playingIntent = false;
+let draggingVol = false;
+
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 2400);
+}
+
+async function fetchStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const d = await r.json();
+    currentIdx = d.station_index;
+    playingIntent = d.playing_intent;
+    const badge = document.getElementById('stateBadge');
+    badge.textContent = d.state;
+    badge.className = 'badge ' + d.state;
+    document.getElementById('curStation').textContent = d.station_name || '(No Station)';
+    document.getElementById('curTrack').textContent = d.stream_title || d.status_msg || '-';
+    document.getElementById('streamMeta').textContent =
+      (d.bitrate_kbps ? d.bitrate_kbps + ' kbps | ' : '') + 'Buf ' + d.buffer_percent + '%';
+    document.getElementById('playStopBtn').textContent = playingIntent ? 'Stop' : 'Play';
+    if (!draggingVol) {
+      document.getElementById('volSlider').value = d.volume;
+      document.getElementById('volLabel').textContent = d.volume + '%';
+    }
+    const bat = d.battery_percent >= 0 ? `Bat ${d.battery_percent}% (${(d.battery_mv/1000).toFixed(2)}V)` : 'USB';
+    const net = d.wifi_connected ? `${d.ssid} (${d.rssi} dBm) ${d.ip}` : `AP Mode (${d.ip})`;
+    document.getElementById('sysInfo').textContent = `${net} | ${bat}`;
+    highlightActiveStation();
+  } catch (e) {}
+}
+
+async function loadStations() {
+  const r = await fetch('/api/stations');
+  const d = await r.json();
+  stations = d.stations || [];
+  currentIdx = d.current_index || 0;
+  if (d.wifi_ssid) document.getElementById('wifiSsid').value = d.wifi_ssid;
+  renderStations();
+}
+
+function renderStations() {
+  const root = document.getElementById('stationList');
+  root.innerHTML = '';
+  stations.forEach((st, idx) => {
+    const row = document.createElement('div');
+    row.className = 'station-item' + (idx === currentIdx ? ' active' : '');
+    row.innerHTML = `
+      <button onclick="tuneStation(${idx})" title="Play this station">&#9654; ${String(idx+1).padStart(2,'0')}</button>
+      <div class="station-fields">
+        <input type="text" value="${escapeAttr(st.name)}" placeholder="Station Name"
+               oninput="stations[${idx}].name=this.value">
+        <input type="url" value="${escapeAttr(st.url)}" placeholder="http://ice1.somafm.com/...-mp3"
+               oninput="stations[${idx}].url=this.value">
+      </div>
+      <div class="station-actions">
+        <button class="secondary" onclick="moveStation(${idx},-1)" title="Move up">&uarr;</button>
+        <button class="secondary" onclick="moveStation(${idx},1)" title="Move down">&darr;</button>
+        <button class="danger" onclick="removeStation(${idx})" title="Delete">&times;</button>
+      </div>`;
+    root.appendChild(row);
+  });
+}
+
+function highlightActiveStation() {
+  const items = document.querySelectorAll('.station-item');
+  items.forEach((el, i) => el.classList.toggle('active', i === currentIdx));
+}
+
+function escapeAttr(s) {
+  return (s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+}
+
+function addStation() {
+  if (stations.length >= 20) { toast('Maximum 20 stations'); return; }
+  stations.push({ name: 'New Station', url: 'http://ice1.somafm.com/groovesalad-128-mp3' });
+  renderStations();
+}
+
+function removeStation(idx) {
+  stations.splice(idx, 1);
+  renderStations();
+}
+
+function moveStation(idx, dir) {
+  const to = idx + dir;
+  if (to < 0 || to >= stations.length) return;
+  const tmp = stations[idx];
+  stations[idx] = stations[to];
+  stations[to] = tmp;
+  renderStations();
+}
+
+async function saveStations() {
+  const r = await fetch('/api/stations', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ stations })
+  });
+  if (r.ok) { toast('Stations saved'); fetchStatus(); }
+  else toast('Save failed');
+}
+
+async function resetStations() {
+  if (!confirm('Restore default SomaFM station presets?')) return;
+  const r = await fetch('/api/stations/reset', { method: 'POST' });
+  if (r.ok) { await loadStations(); toast('Defaults restored'); }
+}
+
+async function tuneStation(idx) {
+  await fetch('/api/control', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ action: 'select', index: idx, play: true })
+  });
+  fetchStatus();
+}
+
+async function togglePlay() {
+  await fetch('/api/control', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ action: playingIntent ? 'stop' : 'play' })
+  });
+  fetchStatus();
+}
+
+function onVolInput(v) {
+  draggingVol = true;
+  document.getElementById('volLabel').textContent = v + '%';
+}
+
+async function setVolume(v) {
+  draggingVol = false;
+  await fetch('/api/control', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ action: 'volume', volume: parseInt(v, 10) })
+  });
+}
+
+async function refreshEpd() {
+  await fetch('/api/control', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ action: 'refresh' })
+  });
+  toast('EPD full refresh requested');
+}
+
+async function saveWifi() {
+  const ssid = document.getElementById('wifiSsid').value.trim();
+  const pass = document.getElementById('wifiPass').value;
+  if (!ssid) { toast('Enter SSID'); return; }
+  const r = await fetch('/api/wifi', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ ssid, password: pass })
+  });
+  if (r.ok) toast('Wi-Fi saved, reconnecting...');
+}
+
+loadStations();
+fetchStatus();
+setInterval(fetchStatus, 2500);
+</script>
+</body>
+</html>

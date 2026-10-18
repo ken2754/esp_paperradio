@@ -1,0 +1,30 @@
+menu "PaperRadio Configuration"
+
+    config PAPERRADIO_HOSTNAME
+        string "mDNS / DHCP hostname"
+        default "paperradio"
+        help
+            Device is reachable as http://<hostname>.local on the LAN.
+
+    config PAPERRADIO_AP_SSID
+        string "Setup SoftAP SSID"
+        default "PaperRadio-Setup"
+
+    config PAPERRADIO_DISPLAY_ROTATE_180
+        bool "Rotate e-paper UI by 180 degrees"
+        default y
+        help
+            Flip the landscape (800x480) UI upside down depending on how the
+            board is mounted.
+
+    config PAPERRADIO_RING_BUFFER_KB
+        int "Audio stream ring buffer size (KB, PSRAM)"
+        range 64 2048
+        default 384
+
+    config PAPERRADIO_PREBUFFER_KB
+        int "Pre-buffer before playback starts (KB)"
+        range 8 512
+        default 48
+
+endmenu
