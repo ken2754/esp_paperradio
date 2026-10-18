@@ -21,6 +21,8 @@ static int s_retry_cnt = 0;
 static char s_ip_str[20] = "0.0.0.0";
 static char s_cur_ssid[33] = "";
 
+static TaskHandle_t s_connect_task = NULL;
+
 static void notify(void)
 {
     if (s_cb) {
@@ -43,21 +45,105 @@ static void start_mdns_once(void)
     }
 }
 
+static void wifi_connect_worker(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        int prof_count = settings_wifi_count();
+        if (prof_count <= 0) {
+            ESP_LOGW(TAG, "no Wi-Fi profiles configured -> activating Setup SoftAP '%s'", CONFIG_PAPERRADIO_AP_SSID);
+            wifi_manager_enable_ap();
+            continue;
+        }
+
+        s_sta_connected = false;
+        esp_wifi_disconnect();
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        esp_wifi_start();
+
+        ESP_LOGI(TAG, "scanning for registered Wi-Fi APs (%d registered)...", prof_count);
+        wifi_scan_config_t scan_cfg = {
+            .show_hidden = true,
+            .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+            .scan_time.active.min = 100,
+            .scan_time.active.max = 250,
+        };
+        esp_err_t err = esp_wifi_scan_start(&scan_cfg, true);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Wi-Fi scan failed (%s)", esp_err_to_name(err));
+        }
+
+        uint16_t ap_count = 0;
+        esp_wifi_scan_get_ap_num(&ap_count);
+        wifi_ap_record_t *ap_list = NULL;
+        if (ap_count > 0) {
+            ap_list = malloc(sizeof(wifi_ap_record_t) * ap_count);
+            if (ap_list) {
+                esp_wifi_scan_get_ap_records(&ap_count, ap_list);
+            }
+        }
+
+        int best_prof_idx = -1;
+        int best_rssi = -128;
+        if (ap_list && ap_count > 0) {
+            for (int i = 0; i < prof_count; i++) {
+                wifi_profile_t prof;
+                if (!settings_get_wifi_profile(i, &prof) || prof.ssid[0] == '\0') {
+                    continue;
+                }
+                for (int a = 0; a < ap_count; a++) {
+                    if (strcmp((char *)ap_list[a].ssid, prof.ssid) == 0) {
+                        ESP_LOGD(TAG, "matched profile %d '%s' with AP (RSSI %d dBm)",
+                                 i, prof.ssid, ap_list[a].rssi);
+                        if (ap_list[a].rssi > best_rssi) {
+                            best_rssi = ap_list[a].rssi;
+                            best_prof_idx = i;
+                        }
+                    }
+                }
+            }
+            free(ap_list);
+        }
+
+        if (best_prof_idx < 0) {
+            ESP_LOGW(TAG, "no registered Wi-Fi AP found in range (%d APs scanned) -> activating Setup SoftAP", ap_count);
+            wifi_manager_enable_ap();
+            continue;
+        }
+
+        wifi_profile_t selected_prof;
+        settings_get_wifi_profile(best_prof_idx, &selected_prof);
+        strlcpy(s_cur_ssid, selected_prof.ssid, sizeof(s_cur_ssid));
+        ESP_LOGI(TAG, "selected strongest registered AP '%s' (RSSI %d dBm, profile %d/%d)",
+                 s_cur_ssid, best_rssi, best_prof_idx + 1, prof_count);
+
+        wifi_config_t sta_cfg = { 0 };
+        strlcpy((char *)sta_cfg.sta.ssid, selected_prof.ssid, sizeof(sta_cfg.sta.ssid));
+        strlcpy((char *)sta_cfg.sta.password, selected_prof.pass, sizeof(sta_cfg.sta.password));
+        sta_cfg.sta.threshold.authmode = (selected_prof.pass[0] == '\0') ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
+
+        s_retry_cnt = 0;
+        s_ap_active = false;
+        esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
+        esp_wifi_connect();
+    }
+}
+
 static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        if (s_cur_ssid[0] != '\0') {
-            esp_wifi_connect();
-        }
+        // Handled directly in worker or upon reconnect
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         s_sta_connected = false;
-        if (s_retry_cnt < MAX_STA_RETRY && s_cur_ssid[0] != '\0') {
+        if (s_retry_cnt < MAX_STA_RETRY && s_cur_ssid[0] != '\0' && !s_ap_active) {
             s_retry_cnt++;
-            ESP_LOGW(TAG, "disconnected, retry %d/%d", s_retry_cnt, MAX_STA_RETRY);
+            ESP_LOGW(TAG, "disconnected from '%s', retry %d/%d", s_cur_ssid, s_retry_cnt, MAX_STA_RETRY);
             esp_wifi_connect();
         } else {
-            ESP_LOGW(TAG, "STA connection failed, enabling Setup SoftAP '%s'", CONFIG_PAPERRADIO_AP_SSID);
+            ESP_LOGW(TAG, "STA connection failed, activating Setup SoftAP '%s'", CONFIG_PAPERRADIO_AP_SSID);
             wifi_manager_enable_ap();
         }
         notify();
@@ -66,7 +152,7 @@ static void event_handler(void *arg, esp_event_base_t base, int32_t id, void *da
         snprintf(s_ip_str, sizeof(s_ip_str), IPSTR, IP2STR(&ev->ip_info.ip));
         s_sta_connected = true;
         s_retry_cnt = 0;
-        ESP_LOGI(TAG, "connected, IP=%s", s_ip_str);
+        ESP_LOGI(TAG, "connected to '%s', IP=%s", s_cur_ssid, s_ip_str);
         start_mdns_once();
         notify();
     }
@@ -90,6 +176,8 @@ esp_err_t wifi_manager_init(wifi_state_cb_t cb)
 
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL));
+
+    xTaskCreatePinnedToCore(wifi_connect_worker, "wifi_conn", 4096, NULL, 4, &s_connect_task, 0);
     return ESP_OK;
 }
 
@@ -105,19 +193,10 @@ esp_err_t wifi_manager_enable_ap(void)
     esp_wifi_stop();
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_cfg));
-    if (s_cur_ssid[0] != '\0') {
-        wifi_config_t sta_cfg = { 0 };
-        char pass[SETTINGS_PASS_LEN] = { 0 };
-        settings_get_wifi(s_cur_ssid, pass);
-        strlcpy((char *)sta_cfg.sta.ssid, s_cur_ssid, sizeof(sta_cfg.sta.ssid));
-        strlcpy((char *)sta_cfg.sta.password, pass, sizeof(sta_cfg.sta.password));
-        esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
-    }
     ESP_ERROR_CHECK(esp_wifi_start());
     s_ap_active = true;
-    if (!s_sta_connected) {
-        strlcpy(s_ip_str, "192.168.4.1", sizeof(s_ip_str));
-    }
+    s_sta_connected = false;
+    strlcpy(s_ip_str, "192.168.4.1", sizeof(s_ip_str));
     ESP_LOGI(TAG, "SoftAP '%s' active at http://192.168.4.1", CONFIG_PAPERRADIO_AP_SSID);
     notify();
     return ESP_OK;
@@ -125,43 +204,18 @@ esp_err_t wifi_manager_enable_ap(void)
 
 esp_err_t wifi_manager_start(void)
 {
-    char pass[SETTINGS_PASS_LEN] = { 0 };
-    if (!settings_get_wifi(s_cur_ssid, pass)) {
-        ESP_LOGW(TAG, "no Wi-Fi credentials saved, starting Setup SoftAP");
-        return wifi_manager_enable_ap();
+    if (s_connect_task) {
+        xTaskNotifyGive(s_connect_task);
     }
-
-    wifi_config_t sta_cfg = { 0 };
-    strlcpy((char *)sta_cfg.sta.ssid, s_cur_ssid, sizeof(sta_cfg.sta.ssid));
-    strlcpy((char *)sta_cfg.sta.password, pass, sizeof(sta_cfg.sta.password));
-    sta_cfg.sta.threshold.authmode = (pass[0] == '\0') ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
-
-    s_retry_cnt = 0;
-    s_ap_active = false;
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta_cfg));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_LOGI(TAG, "connecting to SSID '%s'...", s_cur_ssid);
     return ESP_OK;
 }
 
 esp_err_t wifi_manager_reconnect(void)
 {
-    char pass[SETTINGS_PASS_LEN] = { 0 };
-    settings_get_wifi(s_cur_ssid, pass);
-    if (s_cur_ssid[0] == '\0') {
-        return ESP_ERR_INVALID_ARG;
+    if (s_connect_task) {
+        xTaskNotifyGive(s_connect_task);
     }
-
-    wifi_config_t sta_cfg = { 0 };
-    strlcpy((char *)sta_cfg.sta.ssid, s_cur_ssid, sizeof(sta_cfg.sta.ssid));
-    strlcpy((char *)sta_cfg.sta.password, pass, sizeof(sta_cfg.sta.password));
-
-    s_retry_cnt = 0;
-    s_sta_connected = false;
-    esp_wifi_disconnect();
-    esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
-    return esp_wifi_connect();
+    return ESP_OK;
 }
 
 bool wifi_manager_is_connected(void)

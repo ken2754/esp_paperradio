@@ -12,6 +12,7 @@ static const char *TAG = "SETTINGS";
 #define NVS_NS              "paperradio"
 #define KEY_SSID            "wifi_ssid"
 #define KEY_PASS            "wifi_pass"
+#define KEY_WIFI_PROFS      "wifi_profs"
 #define KEY_STATIONS        "stations"
 #define KEY_CUR_STATION     "cur_station"
 #define KEY_VOLUME          "volume"
@@ -33,14 +34,14 @@ static const station_t k_default_stations[] = {
 #define DEFAULT_STATION_COUNT ((int)(sizeof(k_default_stations) / sizeof(k_default_stations[0])))
 
 static SemaphoreHandle_t s_mutex = NULL;
+static wifi_profile_t s_wifi_profiles[SETTINGS_MAX_WIFI_PROFILES];
+static int s_wifi_profile_count = 0;
 static station_t s_stations[SETTINGS_MAX_STATIONS];
 static int s_station_count = 0;
 static int s_current = 0;
 static int s_volume = DEFAULT_VOLUME;
 static volatile bool s_volume_dirty = false;
 static bool s_autoplay = true;
-static char s_ssid[SETTINGS_SSID_LEN];
-static char s_pass[SETTINGS_PASS_LEN];
 static esp_timer_handle_t s_volume_timer = NULL;
 
 static void lock(void)   { xSemaphoreTake(s_mutex, portMAX_DELAY); }
@@ -78,6 +79,29 @@ static esp_err_t save_stations_locked(void)
     return err;
 }
 
+static esp_err_t save_wifi_profiles_locked(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    size_t len = s_wifi_profile_count * sizeof(wifi_profile_t);
+    err = nvs_set_blob(h, KEY_WIFI_PROFS, s_wifi_profiles, len ? len : 1);
+    if (err == ESP_OK) {
+        if (s_wifi_profile_count > 0) {
+            nvs_set_str(h, KEY_SSID, s_wifi_profiles[0].ssid);
+            nvs_set_str(h, KEY_PASS, s_wifi_profiles[0].pass);
+        } else {
+            nvs_set_str(h, KEY_SSID, "");
+            nvs_set_str(h, KEY_PASS, "");
+        }
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
 static void volume_save_cb(void *arg)
 {
     (void)arg;
@@ -107,13 +131,26 @@ esp_err_t settings_init(void)
     nvs_handle_t h;
     bool loaded_stations = false;
     if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
-        size_t len = sizeof(s_ssid);
-        if (nvs_get_str(h, KEY_SSID, s_ssid, &len) != ESP_OK) {
-            s_ssid[0] = '\0';
-        }
-        len = sizeof(s_pass);
-        if (nvs_get_str(h, KEY_PASS, s_pass, &len) != ESP_OK) {
-            s_pass[0] = '\0';
+        size_t len = sizeof(s_wifi_profiles);
+        if (nvs_get_blob(h, KEY_WIFI_PROFS, s_wifi_profiles, &len) == ESP_OK) {
+            s_wifi_profile_count = (len % sizeof(wifi_profile_t) == 0) ? (int)(len / sizeof(wifi_profile_t)) : 0;
+            if (s_wifi_profile_count > SETTINGS_MAX_WIFI_PROFILES) {
+                s_wifi_profile_count = SETTINGS_MAX_WIFI_PROFILES;
+            }
+        } else {
+            // Legacy fallback: read single SSID/pass and migrate
+            char legacy_ssid[SETTINGS_SSID_LEN] = { 0 };
+            char legacy_pass[SETTINGS_PASS_LEN] = { 0 };
+            len = sizeof(legacy_ssid);
+            if (nvs_get_str(h, KEY_SSID, legacy_ssid, &len) == ESP_OK && legacy_ssid[0] != '\0') {
+                len = sizeof(legacy_pass);
+                if (nvs_get_str(h, KEY_PASS, legacy_pass, &len) != ESP_OK) {
+                    legacy_pass[0] = '\0';
+                }
+                strlcpy(s_wifi_profiles[0].ssid, legacy_ssid, sizeof(s_wifi_profiles[0].ssid));
+                strlcpy(s_wifi_profiles[0].pass, legacy_pass, sizeof(s_wifi_profiles[0].pass));
+                s_wifi_profile_count = 1;
+            }
         }
 
         len = sizeof(s_stations);
@@ -143,40 +180,90 @@ esp_err_t settings_init(void)
         s_stations[i].name[SETTINGS_NAME_LEN - 1] = '\0';
         s_stations[i].url[SETTINGS_URL_LEN - 1] = '\0';
     }
+    for (int i = 0; i < s_wifi_profile_count; i++) {
+        s_wifi_profiles[i].ssid[SETTINGS_SSID_LEN - 1] = '\0';
+        s_wifi_profiles[i].pass[SETTINGS_PASS_LEN - 1] = '\0';
+    }
     if (s_current < 0 || s_current >= s_station_count) {
         s_current = 0;
     }
 
-    ESP_LOGI(TAG, "loaded: ssid='%s', %d stations, current=%d, volume=%d",
-             s_ssid, s_station_count, s_current, s_volume);
+    ESP_LOGI(TAG, "loaded: %d Wi-Fi profiles (primary='%s'), %d stations, current=%d, volume=%d",
+             s_wifi_profile_count,
+             s_wifi_profile_count > 0 ? s_wifi_profiles[0].ssid : "(none)",
+             s_station_count, s_current, s_volume);
     return ESP_OK;
+}
+
+int settings_wifi_count(void)
+{
+    lock();
+    int n = s_wifi_profile_count;
+    unlock();
+    return n;
+}
+
+bool settings_get_wifi_profile(int index, wifi_profile_t *out)
+{
+    if (!out) {
+        return false;
+    }
+    lock();
+    bool ok = false;
+    if (index >= 0 && index < s_wifi_profile_count) {
+        *out = s_wifi_profiles[index];
+        ok = true;
+    }
+    unlock();
+    return ok;
+}
+
+esp_err_t settings_set_wifi_profiles(const wifi_profile_t *profiles, int count)
+{
+    if (count < 0) {
+        count = 0;
+    }
+    if (count > SETTINGS_MAX_WIFI_PROFILES) {
+        count = SETTINGS_MAX_WIFI_PROFILES;
+    }
+
+    lock();
+    s_wifi_profile_count = 0;
+    for (int i = 0; i < count; i++) {
+        if (profiles[i].ssid[0] != '\0') {
+            s_wifi_profiles[s_wifi_profile_count] = profiles[i];
+            s_wifi_profiles[s_wifi_profile_count].ssid[SETTINGS_SSID_LEN - 1] = '\0';
+            s_wifi_profiles[s_wifi_profile_count].pass[SETTINGS_PASS_LEN - 1] = '\0';
+            s_wifi_profile_count++;
+        }
+    }
+    esp_err_t err = save_wifi_profiles_locked();
+    unlock();
+    return err;
 }
 
 bool settings_get_wifi(char ssid[SETTINGS_SSID_LEN], char pass[SETTINGS_PASS_LEN])
 {
     lock();
-    strlcpy(ssid, s_ssid, SETTINGS_SSID_LEN);
-    strlcpy(pass, s_pass, SETTINGS_PASS_LEN);
-    bool ok = s_ssid[0] != '\0';
+    bool ok = false;
+    if (s_wifi_profile_count > 0 && s_wifi_profiles[0].ssid[0] != '\0') {
+        strlcpy(ssid, s_wifi_profiles[0].ssid, SETTINGS_SSID_LEN);
+        strlcpy(pass, s_wifi_profiles[0].pass, SETTINGS_PASS_LEN);
+        ok = true;
+    } else {
+        if (ssid) ssid[0] = '\0';
+        if (pass) pass[0] = '\0';
+    }
     unlock();
     return ok;
 }
 
 esp_err_t settings_set_wifi(const char *ssid, const char *pass)
 {
-    lock();
-    strlcpy(s_ssid, ssid ? ssid : "", sizeof(s_ssid));
-    strlcpy(s_pass, pass ? pass : "", sizeof(s_pass));
-    nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
-    if (err == ESP_OK) {
-        nvs_set_str(h, KEY_SSID, s_ssid);
-        nvs_set_str(h, KEY_PASS, s_pass);
-        err = nvs_commit(h);
-        nvs_close(h);
-    }
-    unlock();
-    return err;
+    wifi_profile_t prof = { 0 };
+    strlcpy(prof.ssid, ssid ? ssid : "", sizeof(prof.ssid));
+    strlcpy(prof.pass, pass ? pass : "", sizeof(prof.pass));
+    return settings_set_wifi_profiles(&prof, (prof.ssid[0] != '\0') ? 1 : 0);
 }
 
 int settings_station_count(void)

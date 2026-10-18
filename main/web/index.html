@@ -118,19 +118,14 @@ input[type="range"] { flex: 1; min-width: 140px; accent-color: var(--accent); }
   </div>
 
   <div class="card">
-    <h2>Wi-Fi Settings</h2>
-    <div style="display:grid;gap:10px;">
-      <div>
-        <label style="font-size:0.8rem;color:var(--muted);">SSID</label>
-        <input type="text" id="wifiSsid" placeholder="Wi-Fi network name">
-      </div>
-      <div>
-        <label style="font-size:0.8rem;color:var(--muted);">Password</label>
-        <input type="password" id="wifiPass" placeholder="Leave blank to keep existing / open network">
-      </div>
+    <h2>Wi-Fi Networks (Up to 5 &mdash; auto-connects to strongest AP)</h2>
+    <div style="font-size:0.85rem;color:var(--muted);margin-bottom:12px;">
+      PaperRadio scans all configured networks and connects to the one with the highest signal strength. If none are reachable, Setup SoftAP is maintained with the audio amplifier safely muted.
     </div>
+    <div class="station-list" id="wifiList"></div>
     <div class="row-gap">
-      <button onclick="saveWifi()">Save &amp; Connect Wi-Fi</button>
+      <button class="secondary" id="addWifiBtn" onclick="addWifi()">+ Add Wi-Fi Network</button>
+      <button onclick="saveWifi()">Save &amp; Reconnect</button>
     </div>
   </div>
 </div>
@@ -180,7 +175,6 @@ async function loadStations() {
   const d = await r.json();
   stations = d.stations || [];
   currentIdx = d.current_index || 0;
-  if (d.wifi_ssid) document.getElementById('wifiSsid').value = d.wifi_ssid;
   renderStations();
 }
 
@@ -288,18 +282,91 @@ async function refreshEpd() {
   toast('EPD full refresh requested');
 }
 
+let wifiProfiles = [];
+let wifiCurrentSsid = '';
+
+async function loadWifi() {
+  try {
+    const r = await fetch('/api/wifi');
+    const d = await r.json();
+    wifiProfiles = d.profiles || [];
+    wifiCurrentSsid = d.current_ssid || '';
+    renderWifi();
+  } catch (e) {
+    console.error('Failed to load Wi-Fi profiles', e);
+  }
+}
+
+function renderWifi() {
+  const container = document.getElementById('wifiList');
+  if (!container) return;
+  container.innerHTML = '';
+  if (wifiProfiles.length === 0) {
+    container.innerHTML = '<div style="color:var(--muted);font-size:0.9rem;padding:8px 0;">No Wi-Fi networks configured yet. Click "+ Add Wi-Fi Network" below.</div>';
+  } else {
+    wifiProfiles.forEach((p, i) => {
+      const isConnected = (p.ssid && p.ssid === wifiCurrentSsid);
+      const row = document.createElement('div');
+      row.className = 'station-item' + (isConnected ? ' active' : '');
+      row.innerHTML = `
+        <div style="font-weight:700;color:var(--muted);min-width:26px;">#${i + 1}</div>
+        <div class="station-fields">
+          <input type="text" placeholder="SSID" value="${escapeAttr(p.ssid || '')}" oninput="wifiProfiles[${i}].ssid=this.value.trim()">
+          <input type="password" placeholder="${p.has_password ? 'Password saved (leave blank to keep)' : 'Password'}" oninput="wifiProfiles[${i}].password=this.value">
+        </div>
+        <div class="station-actions">
+          ${isConnected ? '<span class="badge PLAYING" style="margin-right:6px;">CONNECTED</span>' : ''}
+          <button class="danger" onclick="deleteWifi(${i})" title="Delete">&times;</button>
+        </div>
+      `;
+      container.appendChild(row);
+    });
+  }
+  const addBtn = document.getElementById('addWifiBtn');
+  if (addBtn) {
+    addBtn.style.display = (wifiProfiles.length >= 5) ? 'none' : 'inline-block';
+  }
+}
+
+function addWifi() {
+  if (wifiProfiles.length >= 5) {
+    toast('Maximum 5 Wi-Fi networks reached');
+    return;
+  }
+  wifiProfiles.push({ ssid: '', password: '', has_password: false });
+  renderWifi();
+}
+
+function deleteWifi(idx) {
+  wifiProfiles.splice(idx, 1);
+  renderWifi();
+}
+
 async function saveWifi() {
-  const ssid = document.getElementById('wifiSsid').value.trim();
-  const pass = document.getElementById('wifiPass').value;
-  if (!ssid) { toast('Enter SSID'); return; }
+  const cleanProfiles = [];
+  for (let p of wifiProfiles) {
+    if (p.ssid && p.ssid.trim()) {
+      cleanProfiles.push({
+        ssid: p.ssid.trim(),
+        password: p.password !== undefined ? p.password : ''
+      });
+    }
+  }
   const r = await fetch('/api/wifi', {
-    method: 'POST', headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({ ssid, password: pass })
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ profiles: cleanProfiles })
   });
-  if (r.ok) toast('Wi-Fi saved, reconnecting...');
+  if (r.ok) {
+    toast('Wi-Fi saved! Scanning & connecting...');
+    setTimeout(loadWifi, 2500);
+  } else {
+    toast('Save failed');
+  }
 }
 
 loadStations();
+loadWifi();
 fetchStatus();
 setInterval(fetchStatus, 2500);
 </script>

@@ -96,14 +96,27 @@ static void on_audio_state(audio_state_t st)
 
 static void on_wifi_state(bool sta_connected, bool ap_active, const char *ip_str)
 {
-    (void)ap_active;
     (void)ip_str;
-    if (sta_connected && s_playing_intent && !stream_client_is_running()) {
-        int idx = settings_get_current_station();
-        station_t st;
-        if (settings_get_station(idx, &st)) {
-            stream_client_start(st.url);
+    if (sta_connected) {
+        if (s_playing_intent && !stream_client_is_running()) {
+            int idx = settings_get_current_station();
+            station_t st;
+            if (settings_get_station(idx, &st)) {
+                stream_client_start(st.url);
+            }
         }
+    } else {
+        // Guarantee audio decoding and NS4150B PA amplifier remain completely muted when offline / SoftAP
+        if (stream_client_is_running()) {
+            stream_client_stop();
+        }
+        audio_player_stop();
+
+        lock();
+        if (ap_active) {
+            strlcpy(s_status_msg, "Setup AP: 192.168.4.1", sizeof(s_status_msg));
+        }
+        unlock();
     }
     radio_app_request_ui_refresh(false);
 }

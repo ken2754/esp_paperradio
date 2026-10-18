@@ -16,9 +16,19 @@ typedef struct {
     char url[SETTINGS_URL_LEN];
 } station_t;
 
+#define SETTINGS_MAX_WIFI_PROFILES 5
+
+typedef struct {
+    char ssid[SETTINGS_SSID_LEN];
+    char pass[SETTINGS_PASS_LEN];
+} wifi_profile_t;
+
 esp_err_t settings_init(void);
 
-// --- Wi-Fi credentials ---
+// --- Wi-Fi credentials (Multi-profile up to 5) ---
+int settings_wifi_count(void);
+bool settings_get_wifi_profile(int index, wifi_profile_t *out);
+esp_err_t settings_set_wifi_profiles(const wifi_profile_t *profiles, int count);
 bool settings_get_wifi(char ssid[SETTINGS_SSID_LEN], char pass[SETTINGS_PASS_LEN]);
 esp_err_t settings_set_wifi(const char *ssid, const char *pass);
 

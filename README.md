@@ -6,7 +6,8 @@ Internet radio receiver firmware targeting the **Waveshare ESP32-S3 e-Paper 3.97
 - **SomaFM Presets & Custom Stations**: Preloaded with SomaFM channels (Groove Salad, Drone Zone, Secret Agent, Lush, etc.), fully reconfigurable.
 - **Embedded Web Configuration Portal (`http://paperradio.local`)**:
   - Add, edit, reorder, delete stations, control playback and volume from any browser on the local network.
-  - Automatically launches Setup SoftAP (`PaperRadio-Setup`, `http://192.168.4.1`) on first boot or when holding `BOOT` button for 3 seconds.
+  - **Multi-SSID Wi-Fi Profiles (Up to 5)**: Store up to 5 Wi-Fi credentials; automatically scans and connects to the AP with the strongest signal (highest RSSI).
+  - **Safe Setup SoftAP (`PaperRadio-Setup`, `http://192.168.4.1`)**: Automatically launches if no configured networks are reachable or when holding `BOOT` for 3 seconds. The audio decoder and NS4150B amplifier remain safely powered down and muted while offline.
 - **PSRAM Ring Buffer + Helix MP3 Decoding**:
   - 384 KB ring buffer in Octal PSRAM to prevent audio underruns during e-Paper refresh and network jitter.
   - Fixed-point Helix MP3 decoder running on a dedicated FreeRTOS task on Core 1.

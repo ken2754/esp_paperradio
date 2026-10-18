@@ -239,6 +239,32 @@ static esp_err_t handle_post_control(httpd_req_t *req)
     return send_json(req, res);
 }
 
+static esp_err_t handle_get_wifi(httpd_req_t *req)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON *arr = cJSON_AddArrayToObject(root, "profiles");
+    int count = settings_wifi_count();
+    for (int i = 0; i < count; i++) {
+        wifi_profile_t p;
+        if (settings_get_wifi_profile(i, &p)) {
+            cJSON *item = cJSON_CreateObject();
+            cJSON_AddStringToObject(item, "ssid", p.ssid);
+            cJSON_AddBoolToObject(item, "has_password", p.pass[0] != '\0');
+            cJSON_AddItemToArray(arr, item);
+        }
+    }
+    char cur_ssid[33] = { 0 };
+    wifi_manager_get_ssid(cur_ssid);
+    cJSON_AddStringToObject(root, "current_ssid", cur_ssid);
+    char ip[20] = { 0 };
+    wifi_manager_get_ip(ip);
+    cJSON_AddStringToObject(root, "ip", ip);
+    cJSON_AddNumberToObject(root, "rssi", wifi_manager_get_rssi());
+    cJSON_AddBoolToObject(root, "connected", wifi_manager_is_connected());
+    cJSON_AddBoolToObject(root, "ap_active", wifi_manager_is_ap_active());
+    return send_json(req, root);
+}
+
 static esp_err_t handle_post_wifi(httpd_req_t *req)
 {
     char *body = read_req_body(req);
@@ -253,16 +279,51 @@ static esp_err_t handle_post_wifi(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    cJSON *ssid = cJSON_GetObjectItem(root, "ssid");
-    cJSON *pass = cJSON_GetObjectItem(root, "password");
-    if (cJSON_IsString(ssid) && ssid->valuestring[0] != '\0') {
-        char cur_ssid[SETTINGS_SSID_LEN] = { 0 };
-        char cur_pass[SETTINGS_PASS_LEN] = { 0 };
-        settings_get_wifi(cur_ssid, cur_pass);
-        const char *new_pass = (cJSON_IsString(pass) && pass->valuestring[0] != '\0')
-                               ? pass->valuestring : cur_pass;
-        settings_set_wifi(ssid->valuestring, new_pass);
+    cJSON *arr = cJSON_GetObjectItem(root, "profiles");
+    if (cJSON_IsArray(arr)) {
+        wifi_profile_t list[SETTINGS_MAX_WIFI_PROFILES] = { 0 };
+        int count = 0;
+        cJSON *el = NULL;
+        cJSON_ArrayForEach(el, arr) {
+            if (count >= SETTINGS_MAX_WIFI_PROFILES) {
+                break;
+            }
+            cJSON *ssid = cJSON_GetObjectItem(el, "ssid");
+            cJSON *pass = cJSON_GetObjectItem(el, "password");
+            if (cJSON_IsString(ssid) && ssid->valuestring[0] != '\0') {
+                strlcpy(list[count].ssid, ssid->valuestring, sizeof(list[count].ssid));
+                if (cJSON_IsString(pass) && pass->valuestring[0] != '\0') {
+                    strlcpy(list[count].pass, pass->valuestring, sizeof(list[count].pass));
+                } else {
+                    // Retain existing password if unchanged
+                    int cur_count = settings_wifi_count();
+                    for (int k = 0; k < cur_count; k++) {
+                        wifi_profile_t existing;
+                        if (settings_get_wifi_profile(k, &existing) &&
+                            strcmp(existing.ssid, list[count].ssid) == 0) {
+                            strlcpy(list[count].pass, existing.pass, sizeof(list[count].pass));
+                            break;
+                        }
+                    }
+                }
+                count++;
+            }
+        }
+        settings_set_wifi_profiles(list, count);
         wifi_manager_reconnect();
+    } else {
+        // Legacy single SSID / password format
+        cJSON *ssid = cJSON_GetObjectItem(root, "ssid");
+        cJSON *pass = cJSON_GetObjectItem(root, "password");
+        if (cJSON_IsString(ssid) && ssid->valuestring[0] != '\0') {
+            char cur_ssid[SETTINGS_SSID_LEN] = { 0 };
+            char cur_pass[SETTINGS_PASS_LEN] = { 0 };
+            settings_get_wifi(cur_ssid, cur_pass);
+            const char *new_pass = (cJSON_IsString(pass) && pass->valuestring[0] != '\0')
+                                   ? pass->valuestring : cur_pass;
+            settings_set_wifi(ssid->valuestring, new_pass);
+            wifi_manager_reconnect();
+        }
     }
     cJSON_Delete(root);
 
@@ -294,6 +355,7 @@ esp_err_t web_portal_start(void)
         { .uri = "/api/stations",       .method = HTTP_POST, .handler = handle_post_stations },
         { .uri = "/api/stations/reset", .method = HTTP_POST, .handler = handle_reset_stations },
         { .uri = "/api/control",        .method = HTTP_POST, .handler = handle_post_control },
+        { .uri = "/api/wifi",           .method = HTTP_GET,  .handler = handle_get_wifi },
         { .uri = "/api/wifi",           .method = HTTP_POST, .handler = handle_post_wifi },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
